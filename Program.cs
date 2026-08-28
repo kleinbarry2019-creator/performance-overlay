@@ -803,6 +803,15 @@ internal sealed class MetricsSampler : IDisposable
             await _fps.EnsureProcessAsync(target.ProcessId, settings.PresentMonPath, cancellationToken);
             fps = _fps.ReadFps();
             fpsSource = _fps.Source;
+            // Normal windows do not expose game-style frame presents. Keep a
+            // useful live value on every surface by using the DWM display
+            // cadence as a fallback. Known protected/game titles remain blank
+            // until PresentMon supplies real frames.
+            if (fps is null && !target.Matches(settings.FpsExcludedWindowTitleFragments))
+            {
+                fps = _desktopFps.Read();
+                fpsSource = "DWM Oberfläche";
+            }
         }
         else
         {
