@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
 using System.Net.NetworkInformation;
 using System.Runtime.InteropServices;
 using System.Text.Json;
@@ -13,9 +14,15 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
+        bool requestSettings = args.Any(arg => string.Equals(arg, "--settings", StringComparison.OrdinalIgnoreCase));
+        bool requestToggle = args.Any(arg => string.Equals(arg, "--toggle", StringComparison.OrdinalIgnoreCase));
+        bool requestExit = args.Any(arg => string.Equals(arg, "--exit", StringComparison.OrdinalIgnoreCase));
         using var mutex = new Mutex(true, "Global\\PerformanceOverlay.Singleton", out bool createdNew);
         if (!createdNew)
         {
+            if (requestSettings) OverlayCommandBus.Send("settings");
+            else if (requestToggle) OverlayCommandBus.Send("toggle");
+            else if (requestExit) OverlayCommandBus.Send("exit");
             return;
         }
 
@@ -26,7 +33,42 @@ internal static class Program
         }
 
         ApplicationConfiguration.Initialize();
-        Application.Run(new OverlayApplicationContext());
+        Application.Run(new OverlayApplicationContext(requestSettings));
+    }
+}
+
+internal static class OverlayCommandBus
+{
+    private static string CommandPath => Path.Combine(SettingsStore.DirectoryPath, ".command");
+
+    public static void Send(string command)
+    {
+        try
+        {
+            Directory.CreateDirectory(SettingsStore.DirectoryPath);
+            string temporaryPath = CommandPath + ".tmp-" + Guid.NewGuid().ToString("N");
+            File.WriteAllText(temporaryPath, command);
+            File.Move(temporaryPath, CommandPath, true);
+        }
+        catch
+        {
+            // A concurrently handled command can be retried from the shortcut.
+        }
+    }
+
+    public static string? Consume()
+    {
+        try
+        {
+            if (!File.Exists(CommandPath)) return null;
+            string command = File.ReadAllText(CommandPath).Trim();
+            File.Delete(CommandPath);
+            return command;
+        }
+        catch
+        {
+            return null;
+        }
     }
 }
 
@@ -47,6 +89,8 @@ internal sealed class OverlaySettings
     public bool AntiCheatSafeMode { get; set; } = false;
     public bool EnableFpsTelemetry { get; set; } = true;
     public bool SuspendOverlayForExcludedWindows { get; set; } = false;
+    public string ToggleHotkeyModifiers { get; set; } = "Control+Shift";
+    public string ToggleHotkeyKey { get; set; } = "F10";
     public string[] FpsExcludedWindowTitleFragments { get; set; } = ["Call of Duty"];
     public string PingTarget { get; set; } = "1.1.1.1";
     public string? PresentMonPath { get; set; }
@@ -68,6 +112,8 @@ internal sealed class OverlaySettings
         AntiCheatSafeMode = AntiCheatSafeMode,
         EnableFpsTelemetry = EnableFpsTelemetry,
         SuspendOverlayForExcludedWindows = SuspendOverlayForExcludedWindows,
+        ToggleHotkeyModifiers = ToggleHotkeyModifiers,
+        ToggleHotkeyKey = ToggleHotkeyKey,
         FpsExcludedWindowTitleFragments = FpsExcludedWindowTitleFragments.ToArray(),
         PingTarget = PingTarget,
         PresentMonPath = PresentMonPath
@@ -131,6 +177,8 @@ internal static class SettingsStore
         settings.FontFamily = string.IsNullOrWhiteSpace(settings.FontFamily) ? "Segoe UI" : settings.FontFamily.Trim();
         settings.TextColor = IsHexColor(settings.TextColor) ? settings.TextColor : "#FFFFFF";
         settings.BackgroundColor = IsHexColor(settings.BackgroundColor) ? settings.BackgroundColor : "#111827";
+        settings.ToggleHotkeyModifiers = HotkeyCatalog.NormalizeModifiers(settings.ToggleHotkeyModifiers);
+        settings.ToggleHotkeyKey = HotkeyCatalog.NormalizeKey(settings.ToggleHotkeyKey);
         settings.FpsExcludedWindowTitleFragments = (settings.FpsExcludedWindowTitleFragments ?? Array.Empty<string>())
             .Select(fragment => fragment.Trim())
             .Where(fragment => fragment.Length > 0)
@@ -152,6 +200,60 @@ internal static class SettingsStore
         {
             return false;
         }
+    }
+}
+
+internal static class HotkeyCatalog
+{
+    public static readonly string[] ModifierOptions = [
+        "Control+Shift", "Control+Alt", "Alt+Shift", "Control+Windows", "Alt+Windows", "Shift+Windows"
+    ];
+
+    public static readonly string[] KeyOptions = [
+        .. Enumerable.Range(1, 12).Select(index => $"F{index}"),
+        .. Enumerable.Range('A', 26).Select(value => ((char)value).ToString()),
+        .. Enumerable.Range(0, 10).Select(value => value.ToString())
+    ];
+
+    public static string NormalizeModifiers(string? value) =>
+        ModifierOptions.FirstOrDefault(option => string.Equals(option, value, StringComparison.OrdinalIgnoreCase)) ?? ModifierOptions[0];
+
+    public static string NormalizeKey(string? value) =>
+        KeyOptions.FirstOrDefault(option => string.Equals(option, value, StringComparison.OrdinalIgnoreCase)) ?? "F10";
+
+    public static bool TryParse(string? modifierText, string? keyText, out uint modifiers, out uint key)
+    {
+        modifiers = 0;
+        key = 0;
+        foreach (string part in NormalizeModifiers(modifierText).Split('+', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            modifiers |= part switch
+            {
+                "Control" => 0x0002u,
+                "Alt" => 0x0001u,
+                "Shift" => 0x0004u,
+                "Windows" => 0x0008u,
+                _ => 0u
+            };
+        }
+
+        string normalizedKey = NormalizeKey(keyText);
+        if (normalizedKey.StartsWith('F') && int.TryParse(normalizedKey[1..], out int functionNumber))
+        {
+            key = (uint)(Keys.F1 + functionNumber - 1);
+            return true;
+        }
+        if (normalizedKey.Length == 1 && char.IsLetter(normalizedKey[0]))
+        {
+            key = (uint)(Keys.A + char.ToUpperInvariant(normalizedKey[0]) - 'A');
+            return true;
+        }
+        if (normalizedKey.Length == 1 && char.IsDigit(normalizedKey[0]))
+        {
+            key = (uint)(Keys.D0 + normalizedKey[0] - '0');
+            return true;
+        }
+        return false;
     }
 }
 
@@ -183,7 +285,7 @@ internal sealed class OverlayApplicationContext : ApplicationContext
     private OverlaySettingsForm? _settingsForm;
     private bool _sampling;
 
-    public OverlayApplicationContext()
+    public OverlayApplicationContext(bool openSettings)
     {
         _settings = SettingsStore.Load();
         _sampler = new MetricsSampler();
@@ -210,9 +312,24 @@ internal sealed class OverlayApplicationContext : ApplicationContext
         _notifyIcon.DoubleClick += (_, _) => _form.ToggleVisible();
 
         _timer = new System.Windows.Forms.Timer { Interval = _settings.RefreshMilliseconds };
-        _timer.Tick += async (_, _) => await SampleAndRenderAsync();
+        _timer.Tick += (_, _) =>
+        {
+            HandleExternalCommand();
+            _ = SampleAndRenderAsync();
+        };
         _timer.Start();
         _form.Show();
+        if (openSettings) OpenSettingsUi();
+    }
+
+    private void HandleExternalCommand()
+    {
+        switch (OverlayCommandBus.Consume())
+        {
+            case "settings": OpenSettingsUi(); break;
+            case "toggle": _form.ToggleVisible(); break;
+            case "exit": ExitThread(); break;
+        }
     }
 
     private async Task SampleAndRenderAsync()
@@ -294,11 +411,15 @@ internal sealed class OverlayForm : Form
     private const int WsExTransparent = 0x20;
     private const int WsExToolWindow = 0x80;
     private const int WsExNoActivate = 0x08000000;
-    private readonly FlowLayoutPanel _line;
+    private const int WsExLayered = 0x00080000;
+    private const int WmHotkey = 0x0312;
+    private const int ToggleHotkeyId = 0x4F56;
     private OverlaySettings _settings;
     private MetricsSnapshot _snapshot = MetricsSnapshot.Empty;
+    private readonly List<string> _metricTexts = new();
     private bool _userVisible = true;
     private bool _compatibilitySuspended;
+    private bool _hotkeyRegistered;
 
     public OverlayForm(OverlaySettings settings)
     {
@@ -310,18 +431,6 @@ internal sealed class OverlayForm : Form
         AutoScaleMode = AutoScaleMode.Dpi;
         DoubleBuffered = true;
         Padding = new Padding(7, 5, 7, 5);
-
-        _line = new FlowLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            AutoSize = true,
-            WrapContents = false,
-            FlowDirection = FlowDirection.LeftToRight,
-            Margin = Padding.Empty,
-            Padding = Padding.Empty,
-            BackColor = Color.Transparent
-        };
-        Controls.Add(_line);
         ApplySettings(settings);
         UpdateSnapshot(MetricsSnapshot.Empty);
     }
@@ -331,7 +440,7 @@ internal sealed class OverlayForm : Form
         get
         {
             var cp = base.CreateParams;
-            cp.ExStyle |= WsExToolWindow | WsExNoActivate;
+            cp.ExStyle |= WsExToolWindow | WsExNoActivate | WsExLayered;
             // WinForms can request CreateParams from the base Form constructor
             // before the derived constructor has assigned its settings field.
             if (_settings?.ClickThrough == true) cp.ExStyle |= WsExTransparent;
@@ -353,7 +462,9 @@ internal sealed class OverlayForm : Form
             ForeColor = Color.White;
         }
 
-        Opacity = Math.Max(0.05, settings.BackgroundOpacity / 255.0);
+        // Do not use Form.Opacity here: it would make the metric text translucent too.
+        // RenderLayeredSurface applies alpha only to the background brush.
+        Opacity = 1.0;
         try
         {
             Font = new Font(settings.FontFamily, settings.FontSize, FontStyle.Regular, GraphicsUnit.Point);
@@ -368,26 +479,123 @@ internal sealed class OverlayForm : Form
         ApplyVisibility();
     }
 
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        RegisterToggleHotkey();
+        RenderLayeredSurface();
+    }
+
+    protected override void OnHandleDestroyed(EventArgs e)
+    {
+        UnregisterToggleHotkey();
+        base.OnHandleDestroyed(e);
+    }
+
+    protected override void WndProc(ref Message m)
+    {
+        if (m.Msg == WmHotkey && m.WParam.ToInt32() == ToggleHotkeyId)
+        {
+            ToggleVisible();
+        }
+        base.WndProc(ref m);
+    }
+
+    private void RegisterToggleHotkey()
+    {
+        if (_hotkeyRegistered || !HotkeyCatalog.TryParse(_settings.ToggleHotkeyModifiers, _settings.ToggleHotkeyKey, out uint modifiers, out uint key)) return;
+        _hotkeyRegistered = NativeMethods.RegisterHotKey(Handle, ToggleHotkeyId, modifiers | 0x4000u, key);
+    }
+
+    private void UnregisterToggleHotkey()
+    {
+        if (!_hotkeyRegistered || !IsHandleCreated) return;
+        NativeMethods.UnregisterHotKey(Handle, ToggleHotkeyId);
+        _hotkeyRegistered = false;
+    }
+
     public void UpdateSnapshot(MetricsSnapshot snapshot)
     {
         _snapshot = snapshot;
-        _line.Controls.Clear();
+        _metricTexts.Clear();
         AddMetric("FPS", snapshot.Fps is null ? "--" : $"{snapshot.Fps:0}");
         AddMetric("CPU", $"{snapshot.CpuUsage:0}% | {FormatTemperature(snapshot.CpuTemperature)}");
         AddMetric("GPU", $"{snapshot.GpuUsage:0}% | {FormatTemperature(snapshot.GpuTemperature)}");
         AddMetric("NET", $"↓{snapshot.DownloadKibPerSecond:0} ↑{snapshot.UploadKibPerSecond:0} KiB/s");
         AddMetric("LOSS", snapshot.PacketLossPercent is null ? "--" : $"{snapshot.PacketLossPercent:0.0}%");
-        Width = _line.PreferredSize.Width + Padding.Horizontal;
-        Height = _line.PreferredSize.Height + Padding.Vertical;
-        ApplyRoundedRegion();
+        int width = Padding.Horizontal;
+        int height = 18;
+        foreach (string text in _metricTexts)
+        {
+            Size measured = TextRenderer.MeasureText(text, Font, Size.Empty, TextFormatFlags.NoPadding);
+            width += measured.Width + 12;
+            height = Math.Max(height, measured.Height + Padding.Vertical);
+        }
+        Width = Math.Max(40, width);
+        Height = Math.Max(26, height);
+        RenderLayeredSurface();
     }
 
     private static string FormatTemperature(double? value) => value is null ? "--" : $"{value:0}°C";
 
     private void AddMetric(string name, string value)
     {
-        var chip = new MetricChip($"{name} {value}", ForeColor, Font);
-        _line.Controls.Add(chip);
+        _metricTexts.Add($"{name} {value}");
+    }
+
+    private void RenderLayeredSurface()
+    {
+        if (!IsHandleCreated || Width < 2 || Height < 2) return;
+
+        IntPtr screenDc = IntPtr.Zero;
+        IntPtr memoryDc = IntPtr.Zero;
+        IntPtr bitmapHandle = IntPtr.Zero;
+        IntPtr previousBitmap = IntPtr.Zero;
+        try
+        {
+            using var bitmap = new Bitmap(Width, Height, PixelFormat.Format32bppArgb);
+            using (var graphics = Graphics.FromImage(bitmap))
+            using (var background = new SolidBrush(Color.FromArgb(_settings.BackgroundOpacity, ParseColor(_settings.BackgroundColor, Color.FromArgb(17, 24, 39)))))
+            using (var textBrush = new SolidBrush(ForeColor))
+            using (var stringFormat = new StringFormat(StringFormat.GenericTypographic))
+            {
+                graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+                graphics.Clear(Color.Transparent);
+                using var path = RoundedRectangle(new Rectangle(0, 0, Width, Height), _settings.CornerRadius);
+                graphics.FillPath(background, path);
+
+                float x = Padding.Left;
+                float y = Math.Max(0, (Height - Font.GetHeight()) / 2F - 1F);
+                foreach (string text in _metricTexts)
+                {
+                    graphics.DrawString(text, Font, textBrush, x, y, stringFormat);
+                    x += graphics.MeasureString(text, Font, PointF.Empty, stringFormat).Width + 12F;
+                }
+            }
+
+            screenDc = NativeMethods.GetDC(IntPtr.Zero);
+            memoryDc = NativeMethods.CreateCompatibleDC(screenDc);
+            bitmapHandle = bitmap.GetHbitmap(Color.FromArgb(0, 0, 0, 0));
+            previousBitmap = NativeMethods.SelectObject(memoryDc, bitmapHandle);
+            var destination = new NativeMethods.Point(Location.X, Location.Y);
+            var size = new NativeMethods.Size(Width, Height);
+            var source = new NativeMethods.Point(0, 0);
+            var blend = new NativeMethods.BlendFunction(0, 0, 255, 1);
+            NativeMethods.UpdateLayeredWindow(Handle, screenDc, ref destination, ref size, memoryDc, ref source, 0, ref blend, 2);
+        }
+        catch
+        {
+            // A display mode change can invalidate a layered surface mid-frame.
+            // The next metric tick will render it again.
+        }
+        finally
+        {
+            if (previousBitmap != IntPtr.Zero && memoryDc != IntPtr.Zero) NativeMethods.SelectObject(memoryDc, previousBitmap);
+            if (bitmapHandle != IntPtr.Zero) NativeMethods.DeleteObject(bitmapHandle);
+            if (memoryDc != IntPtr.Zero) NativeMethods.DeleteDC(memoryDc);
+            if (screenDc != IntPtr.Zero) NativeMethods.ReleaseDC(IntPtr.Zero, screenDc);
+        }
     }
 
     public void ToggleVisible()
@@ -425,20 +633,13 @@ internal sealed class OverlayForm : Form
     protected override void OnResize(EventArgs e)
     {
         base.OnResize(e);
-        ApplyRoundedRegion();
-    }
-
-    private void ApplyRoundedRegion()
-    {
-        if (Width < 2 || Height < 2) return;
-        Region?.Dispose();
-        using var path = RoundedRectangle(new Rectangle(0, 0, Width, Height), _settings.CornerRadius);
-        Region = new Region(path);
+        RenderLayeredSurface();
     }
 
     private void PlaceOnSelectedScreen()
     {
         var screens = Screen.AllScreens;
+        if (screens.Length == 0) return;
         var screen = screens[Math.Min(_settings.ScreenIndex, screens.Length - 1)];
         Location = new Point(screen.WorkingArea.Left + _settings.OffsetX, screen.WorkingArea.Top + _settings.OffsetY);
     }
@@ -463,6 +664,70 @@ internal sealed class OverlayForm : Form
         path.AddArc(arc, 90, 90);
         path.CloseFigure();
         return path;
+    }
+
+    private static Color ParseColor(string value, Color fallback)
+    {
+        try { return ColorTranslator.FromHtml(value); } catch { return fallback; }
+    }
+
+    private static class NativeMethods
+    {
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern IntPtr GetDC(IntPtr hWnd);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern int ReleaseDC(IntPtr hWnd, IntPtr hDc);
+
+        [DllImport("gdi32.dll", SetLastError = true)]
+        public static extern IntPtr CreateCompatibleDC(IntPtr hDc);
+
+        [DllImport("gdi32.dll", SetLastError = true)]
+        public static extern IntPtr SelectObject(IntPtr hDc, IntPtr objectHandle);
+
+        [DllImport("gdi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool DeleteObject(IntPtr objectHandle);
+
+        [DllImport("gdi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool DeleteDC(IntPtr hDc);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool UpdateLayeredWindow(IntPtr hWnd, IntPtr hDcDst, ref Point pointDst, ref Size size,
+            IntPtr hDcSrc, ref Point pointSrc, int colorKey, ref BlendFunction blend, int flags);
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct Point(int x, int y)
+        {
+            public int X = x;
+            public int Y = y;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct Size(int width, int height)
+        {
+            public int Width = width;
+            public int Height = height;
+        }
+
+        [StructLayout(LayoutKind.Sequential, Pack = 1)]
+        public struct BlendFunction(byte operation, byte flags, byte sourceConstantAlpha, byte alphaFormat)
+        {
+            public byte Operation = operation;
+            public byte Flags = flags;
+            public byte SourceConstantAlpha = sourceConstantAlpha;
+            public byte AlphaFormat = alphaFormat;
+        }
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool UnregisterHotKey(IntPtr hWnd, int id);
     }
 }
 
@@ -721,8 +986,19 @@ internal static class CpuTemperatureReader
     public static async Task<double?> ReadAsync(CancellationToken cancellationToken)
     {
         const string script = @"
-$values = @(Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction SilentlyContinue |
-  ForEach-Object { [double]$_.CurrentTemperature / 10 })
+$values = @()
+# Use an already installed hardware-monitor provider when available. These
+# namespaces expose CPU sensors without reading device memory or installing a driver.
+foreach ($namespace in @('root/LibreHardwareMonitor', 'root/OpenHardwareMonitor')) {
+  if ($values.Count -gt 0) { break }
+  $values = @(Get-CimInstance -Namespace $namespace -ClassName Sensor -ErrorAction SilentlyContinue |
+    Where-Object { $_.SensorType -eq 'Temperature' -and $_.HardwareType -match 'CPU|Processor' -and $_.Name -match 'Package|Tctl|Tdie|Core' } |
+    ForEach-Object { [double]$_.Value })
+}
+if ($values.Count -eq 0) {
+  $values = @(Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction SilentlyContinue |
+    ForEach-Object { [double]$_.CurrentTemperature / 10 })
+}
 if ($values.Count -eq 0) {
   # Windows performance data is in Kelvin. Only use zones explicitly identified
   # as CPU/DTS; generic zones can represent the room, battery, or chassis.

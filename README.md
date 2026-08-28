@@ -24,8 +24,12 @@ dotnet run -c Release
 
 Für einen fertigen x64-Build genügt `PerformanceOverlay.exe`. Der FPS-Wert wird nur aus PresentMon-Frame-Presents berechnet. GPU-Werte verwenden `nvidia-smi.exe`; CPU-Temperatur kann je nach ACPI-Sensor nicht verfügbar sein und wird dann als `--` dargestellt.
 
-Die Konfiguration liegt unter `%APPDATA%\PerformanceOverlay\settings.json` und kann über **Overlay-Einstellungen …** im Tray-Menü bearbeitet werden. Die Oberfläche unterstützt Schriftart, Größe, Textfarbe, Hintergrundfarbe, stufenlose Transparenz, Eckenradius, Monitor, Position, Klick-Durchlässigkeit, Messintervall, Ping-Ziel und die Safe-Modus-Ausschlussliste. Änderungen werden sofort gespeichert und angewendet.
+Zusätzliche Desktop-Verknüpfungen können `PerformanceOverlay.exe --toggle` zum Ein-/Ausblenden und `PerformanceOverlay.exe --settings` zum Öffnen der Einstellungsseite verwenden. Die Anwendung startet nicht automatisch mit Windows.
 
-Für FPS-Telemetrie benötigt der Windows-Benutzer Zugriff auf ETW-Leistungsprotokolle (lokale Gruppe **Leistungsprotokollbenutzer**). Nach einer neuen Gruppenmitgliedschaft ist eine erneute Windows-Anmeldung erforderlich. Ohne einen vom Gerät bereitgestellten CPU-Thermalsensor bleibt die CPU-Temperatur korrekt `--`; die Anwendung erfindet keinen Wert.
+Die Konfiguration liegt unter `%APPDATA%\PerformanceOverlay\settings.json` und kann über **Overlay-Einstellungen …** im Tray-Menü bearbeitet werden. Die Oberfläche unterstützt Schriftart, Größe, Textfarbe, Hintergrundfarbe, stufenlose Transparenz, Eckenradius, Monitor, Position, Klick-Durchlässigkeit, Messintervall, Ping-Ziel, die Safe-Modus-Ausschlussliste sowie einen frei wählbaren globalen Ein/Aus-Hotkey (Modifier plus F-Taste, Buchstabe oder Ziffer). Änderungen werden sofort gespeichert und angewendet. Standard: `Ctrl+Shift+F10`.
+
+Der Hotkey wird als Windows-System-Hotkey registriert und nicht über einen globalen Tastatur-Hook erfasst. Falls die Kombination bereits von Windows oder einer anderen Anwendung belegt ist, bleibt das Overlay über Tray, Desktop-Verknüpfung oder `--toggle` steuerbar; in diesem Fall eine andere Kombination auswählen.
+
+Für FPS-Telemetrie benötigt der Windows-Benutzer Zugriff auf ETW-Leistungsprotokolle (lokale Gruppe **Leistungsprotokollbenutzer**). Nach einer neuen Gruppenmitgliedschaft ist eine erneute Windows-Anmeldung erforderlich. Die CPU-Temperatur wird aus einem vorhandenen LibreHardwareMonitor-/OpenHardwareMonitor-Provider oder einem expliziten Windows-ACPI-CPU-Sensor gelesen. Wenn kein solcher Sensor verfügbar ist, bleibt sie korrekt `--`; die Anwendung erfindet keinen Wert. Die GPU-Temperatur der NVIDIA-Karte kommt direkt aus `nvidia-smi.exe`.
 
 Borderless/Windowed ist zuverlässiger als exklusives Fullscreen; Anti-Cheat kann externe Overlays ausblenden.

@@ -23,6 +23,8 @@ internal sealed class OverlaySettingsForm : Form
     private readonly CheckBox _safeMode = new();
     private readonly CheckBox _fpsTelemetry = new();
     private readonly CheckBox _suspendExcluded = new();
+    private readonly ComboBox _hotkeyModifiers = new();
+    private readonly ComboBox _hotkeyKey = new();
 
     public OverlaySettingsForm(OverlaySettings settings, Action<OverlaySettings> apply)
     {
@@ -135,6 +137,12 @@ internal sealed class OverlaySettingsForm : Form
         AddRow(grid, "Aktualisierung", ConfigureNumeric(_refresh, 250, 5000, 50, 1000, " ms"));
         AddRow(grid, "Temperaturen", ConfigureNumeric(_temperatureRefresh, 1000, 30000, 500, 5000, " ms"));
         AddRow(grid, "Ping-Ziel", _pingTarget);
+        var hotkeyPanel = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, AutoSize = true, BackColor = Color.Transparent };
+        ConfigureCombo(_hotkeyModifiers, HotkeyCatalog.ModifierOptions, 138);
+        ConfigureCombo(_hotkeyKey, HotkeyCatalog.KeyOptions, 82);
+        hotkeyPanel.Controls.Add(_hotkeyModifiers);
+        hotkeyPanel.Controls.Add(_hotkeyKey);
+        AddRow(grid, "Ein/Aus-Hotkey", hotkeyPanel);
 
         _clickThrough.Text = "Overlay klick-durchlässig (empfohlen)";
         _safeMode.Text = "Anti-Cheat-Safe-Modus";
@@ -310,6 +318,16 @@ internal sealed class OverlaySettingsForm : Form
         };
     }
 
+    private static void ConfigureCombo(ComboBox combo, IEnumerable<string> items, int width)
+    {
+        combo.DropDownStyle = ComboBoxStyle.DropDownList;
+        combo.Width = width;
+        combo.Height = 30;
+        combo.BackColor = Color.FromArgb(30, 41, 59);
+        combo.ForeColor = Color.White;
+        combo.Items.AddRange(items.Cast<object>().ToArray());
+    }
+
     private void LoadValues()
     {
         _fontFamily.Items.Clear();
@@ -350,6 +368,8 @@ internal sealed class OverlaySettingsForm : Form
         _refresh.Value = ClampDecimal(_settings.RefreshMilliseconds, _refresh.Minimum, _refresh.Maximum);
         _temperatureRefresh.Value = ClampDecimal(_settings.TemperatureRefreshMilliseconds, _temperatureRefresh.Minimum, _temperatureRefresh.Maximum);
         _pingTarget.Text = _settings.PingTarget;
+        _hotkeyModifiers.SelectedItem = HotkeyCatalog.NormalizeModifiers(_settings.ToggleHotkeyModifiers);
+        _hotkeyKey.SelectedItem = HotkeyCatalog.NormalizeKey(_settings.ToggleHotkeyKey);
         _clickThrough.Checked = _settings.ClickThrough;
         _safeMode.Checked = _settings.AntiCheatSafeMode;
         _fpsTelemetry.Checked = _settings.EnableFpsTelemetry;
@@ -370,6 +390,8 @@ internal sealed class OverlaySettingsForm : Form
         _settings.RefreshMilliseconds = (int)_refresh.Value;
         _settings.TemperatureRefreshMilliseconds = (int)_temperatureRefresh.Value;
         _settings.PingTarget = string.IsNullOrWhiteSpace(_pingTarget.Text) ? "1.1.1.1" : _pingTarget.Text.Trim();
+        _settings.ToggleHotkeyModifiers = HotkeyCatalog.NormalizeModifiers(_hotkeyModifiers.SelectedItem?.ToString());
+        _settings.ToggleHotkeyKey = HotkeyCatalog.NormalizeKey(_hotkeyKey.SelectedItem?.ToString());
         _settings.ClickThrough = _clickThrough.Checked;
         _settings.AntiCheatSafeMode = _safeMode.Checked;
         _settings.EnableFpsTelemetry = _fpsTelemetry.Checked;

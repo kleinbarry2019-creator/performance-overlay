@@ -14,6 +14,8 @@
   "AntiCheatSafeMode": false,
   "EnableFpsTelemetry": true,
   "SuspendOverlayForExcludedWindows": false,
+  "ToggleHotkeyModifiers": "Control+Shift",
+  "ToggleHotkeyKey": "F10",
   "FpsExcludedWindowTitleFragments": [
     "Call of Duty"
   ],
