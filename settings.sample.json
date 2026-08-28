@@ -1,0 +1,16 @@
+{
+  "RefreshMilliseconds": 1000,
+  "TemperatureRefreshMilliseconds": 5000,
+  "FontFamily": "Segoe UI",
+  "FontSize": 11.5,
+  "TextColor": "#FFFFFF",
+  "BackgroundColor": "#111827",
+  "BackgroundOpacity": 205,
+  "CornerRadius": 9,
+  "ScreenIndex": 0,
+  "OffsetX": 18,
+  "OffsetY": 18,
+  "ClickThrough": true,
+  "PingTarget": "1.1.1.1",
+  "PresentMonPath": null
+}

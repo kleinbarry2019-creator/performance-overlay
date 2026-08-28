@@ -1,0 +1,20 @@
+name: GitHub Pages action (not enabled)
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy to GitHub Pages
+        uses: JamesIves/github-pages-deploy-action@v4.9.0
+        with:
+          folder: docs/site
+
+# This desktop project has no generated web site, so this remains an example.
