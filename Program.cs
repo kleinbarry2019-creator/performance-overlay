@@ -416,6 +416,15 @@ internal sealed class OverlayForm : Form
     private OverlaySettings _settings;
     private MetricsSnapshot _snapshot = MetricsSnapshot.Empty;
     private readonly List<string> _metricTexts = new();
+    private readonly List<int> _metricWidths = new();
+    private static readonly string[] MetricWidthSamples =
+    {
+        "9999 FPS",
+        "100% CPU",
+        "100% - 100°C GPU",
+        "↓9999999 ↑9999999 KiB/s NET",
+        "100.0% LOSS"
+    };
     private bool _userVisible = true;
     private bool _compatibilitySuspended;
     private bool _hotkeyRegistered;
@@ -522,22 +531,21 @@ internal sealed class OverlayForm : Form
         AddMetric($"{snapshot.GpuUsage:0}% - {FormatTemperature(snapshot.GpuTemperature)} GPU");
         AddMetric($"↓{snapshot.DownloadKibPerSecond:0} ↑{snapshot.UploadKibPerSecond:0} KiB/s NET");
         AddMetric(snapshot.PacketLossPercent is null ? "-- LOSS" : $"{snapshot.PacketLossPercent:0.0}% LOSS");
+        _metricWidths.Clear();
         int width = Padding.Horizontal;
-        int height = 18;
         for (int index = 0; index < _metricTexts.Count; index++)
         {
-            string text = _metricTexts[index];
-            Size measured = TextRenderer.MeasureText(text, Font, Size.Empty, TextFormatFlags.NoPadding);
-            width += measured.Width + 12;
+            Size reserved = TextRenderer.MeasureText(MetricWidthSamples[index], Font, Size.Empty, TextFormatFlags.NoPadding);
+            _metricWidths.Add(reserved.Width);
+            width += reserved.Width + 12;
             if (index < _metricTexts.Count - 1)
             {
                 Size separator = TextRenderer.MeasureText("|", Font, Size.Empty, TextFormatFlags.NoPadding);
                 width += separator.Width + 12;
             }
-            height = Math.Max(height, measured.Height + Padding.Vertical);
         }
         Width = Math.Max(40, width);
-        Height = Math.Max(26, height);
+        Height = Math.Max(26, (int)Math.Ceiling(Font.GetHeight()) + Padding.Vertical);
         RenderLayeredSurface();
     }
 
@@ -559,7 +567,11 @@ internal sealed class OverlayForm : Form
             using (var graphics = Graphics.FromImage(bitmap))
             using (var background = new SolidBrush(Color.FromArgb(_settings.BackgroundOpacity, ParseColor(_settings.BackgroundColor, Color.FromArgb(17, 24, 39)))))
             using (var textBrush = new SolidBrush(ForeColor))
-            using (var stringFormat = new StringFormat(StringFormat.GenericTypographic))
+            using (var stringFormat = new StringFormat(StringFormat.GenericTypographic)
+            {
+                FormatFlags = StringFormatFlags.NoWrap,
+                Trimming = StringTrimming.EllipsisCharacter
+            })
             {
                 graphics.SmoothingMode = SmoothingMode.AntiAlias;
                 graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
@@ -572,8 +584,9 @@ internal sealed class OverlayForm : Form
                 for (int index = 0; index < _metricTexts.Count; index++)
                 {
                     string text = _metricTexts[index];
-                    graphics.DrawString(text, Font, textBrush, x, y, stringFormat);
-                    x += graphics.MeasureString(text, Font, PointF.Empty, stringFormat).Width + 12F;
+                    var metricBounds = new RectangleF(x, 0, _metricWidths[index], Height);
+                    graphics.DrawString(text, Font, textBrush, metricBounds, stringFormat);
+                    x += _metricWidths[index] + 12F;
                     if (index < _metricTexts.Count - 1)
                     {
                         graphics.DrawString("|", Font, textBrush, x, y, stringFormat);
@@ -1403,3 +1416,4 @@ internal static class SelfTest
         }
     }
 }
+
