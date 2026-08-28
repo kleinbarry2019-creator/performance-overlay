@@ -44,6 +44,10 @@ internal sealed class OverlaySettings
     public int OffsetX { get; set; } = 18;
     public int OffsetY { get; set; } = 18;
     public bool ClickThrough { get; set; } = true;
+    public bool AntiCheatSafeMode { get; set; } = true;
+    public bool EnableFpsTelemetry { get; set; } = true;
+    public bool SuspendOverlayForExcludedWindows { get; set; } = true;
+    public string[] FpsExcludedWindowTitleFragments { get; set; } = ["Call of Duty"];
     public string PingTarget { get; set; } = "1.1.1.1";
     public string? PresentMonPath { get; set; }
 }
@@ -105,6 +109,12 @@ internal static class SettingsStore
         settings.FontFamily = string.IsNullOrWhiteSpace(settings.FontFamily) ? "Segoe UI" : settings.FontFamily.Trim();
         settings.TextColor = IsHexColor(settings.TextColor) ? settings.TextColor : "#FFFFFF";
         settings.BackgroundColor = IsHexColor(settings.BackgroundColor) ? settings.BackgroundColor : "#111827";
+        settings.FpsExcludedWindowTitleFragments = (settings.FpsExcludedWindowTitleFragments ?? Array.Empty<string>())
+            .Select(fragment => fragment.Trim())
+            .Where(fragment => fragment.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(32)
+            .ToArray();
         return settings;
     }
 
@@ -135,9 +145,10 @@ internal sealed record MetricsSnapshot(
     double? PingMilliseconds,
     string TargetProcess,
     string FpsSource,
-    DateTimeOffset Timestamp)
+    DateTimeOffset Timestamp,
+    bool CompatibilitySuspended)
 {
-    public static MetricsSnapshot Empty => new(null, 0, null, 0, null, 0, 0, null, null, "Desktop", "PresentMon fehlt", DateTimeOffset.Now);
+    public static MetricsSnapshot Empty => new(null, 0, null, 0, null, 0, 0, null, null, "Desktop", "PresentMon fehlt", DateTimeOffset.Now, false);
 }
 
 internal sealed class OverlayApplicationContext : ApplicationContext
@@ -159,6 +170,7 @@ internal sealed class OverlayApplicationContext : ApplicationContext
         var menu = new ContextMenuStrip();
         menu.Items.Add("Overlay anzeigen/verbergen", null, (_, _) => _form.ToggleVisible());
         menu.Items.Add("Klick-Durchlässigkeit umschalten", null, (_, _) => ToggleClickThrough());
+        menu.Items.Add("Anti-Cheat-Safe-Modus umschalten", null, (_, _) => ToggleAntiCheatSafeMode());
         menu.Items.Add("Konfiguration öffnen", null, (_, _) => OpenSettings());
         menu.Items.Add("Messquelle zurücksetzen", null, (_, _) => _sampler.ResetFpsProvider());
         menu.Items.Add(new ToolStripSeparator());
@@ -189,6 +201,7 @@ internal sealed class OverlayApplicationContext : ApplicationContext
             if (!_form.IsDisposed)
             {
                 _form.UpdateSnapshot(snapshot);
+                _form.SetCompatibilitySuspended(snapshot.CompatibilitySuspended);
             }
         }
         finally
@@ -202,6 +215,16 @@ internal sealed class OverlayApplicationContext : ApplicationContext
         _settings.ClickThrough = !_settings.ClickThrough;
         SettingsStore.Save(_settings);
         _form.ApplySettings(_settings);
+    }
+
+    private void ToggleAntiCheatSafeMode()
+    {
+        _settings.AntiCheatSafeMode = !_settings.AntiCheatSafeMode;
+        SettingsStore.Save(_settings);
+        _form.ApplySettings(_settings);
+        _form.ShowBalloon("Performance Overlay", _settings.AntiCheatSafeMode
+            ? "Anti-Cheat-Safe-Modus aktiviert."
+            : "Anti-Cheat-Safe-Modus deaktiviert; nur für ausdrücklich unterstützte Spiele verwenden.");
     }
 
     private void OpenSettings()
@@ -231,6 +254,8 @@ internal sealed class OverlayForm : Form
     private readonly FlowLayoutPanel _line;
     private OverlaySettings _settings;
     private MetricsSnapshot _snapshot = MetricsSnapshot.Empty;
+    private bool _userVisible = true;
+    private bool _compatibilitySuspended;
 
     public OverlayForm(OverlaySettings settings)
     {
@@ -295,6 +320,7 @@ internal sealed class OverlayForm : Form
         RecreateHandle();
         PlaceOnSelectedScreen();
         UpdateSnapshot(_snapshot);
+        ApplyVisibility();
     }
 
     public void UpdateSnapshot(MetricsSnapshot snapshot)
@@ -321,8 +347,28 @@ internal sealed class OverlayForm : Form
 
     public void ToggleVisible()
     {
-        Visible = !Visible;
-        if (Visible) PlaceOnSelectedScreen();
+        _userVisible = !_userVisible;
+        ApplyVisibility();
+    }
+
+    public void SetCompatibilitySuspended(bool suspended)
+    {
+        _compatibilitySuspended = suspended;
+        ApplyVisibility();
+    }
+
+    private void ApplyVisibility()
+    {
+        bool shouldBeVisible = _userVisible && !_compatibilitySuspended;
+        if (shouldBeVisible)
+        {
+            PlaceOnSelectedScreen();
+            if (!Visible) Show();
+        }
+        else if (Visible)
+        {
+            Hide();
+        }
     }
 
     public void ShowBalloon(string title, string message)
@@ -417,8 +463,18 @@ internal sealed class MetricsSampler : IDisposable
         double cpuUsage = _cpu.ReadPercent();
         var network = _network.ReadRates();
         var target = ForegroundProcess.Get();
-        await _fps.EnsureProcessAsync(target.ProcessId, settings.PresentMonPath, cancellationToken);
-        double? fps = _fps.ReadFps();
+        bool excludedBySafeMode = settings.AntiCheatSafeMode && target.Matches(settings.FpsExcludedWindowTitleFragments);
+        double? fps;
+        if (settings.EnableFpsTelemetry && !excludedBySafeMode)
+        {
+            await _fps.EnsureProcessAsync(target.ProcessId, settings.PresentMonPath, cancellationToken);
+            fps = _fps.ReadFps();
+        }
+        else
+        {
+            _fps.Pause(excludedBySafeMode ? "FPS pausiert (Safe-Modus)" : "FPS deaktiviert");
+            fps = null;
+        }
 
         if (now - _lastTemperatureRead >= TimeSpan.FromMilliseconds(settings.TemperatureRefreshMilliseconds))
         {
@@ -432,7 +488,8 @@ internal sealed class MetricsSampler : IDisposable
         var ping = await _packetLoss.ReadAsync(settings.PingTarget, cancellationToken);
         return new MetricsSnapshot(fps, cpuUsage, _cpuTemperature, _gpuUsage, _gpuTemperature,
             network.DownloadKibPerSecond, network.UploadKibPerSecond, ping.LossPercent,
-            ping.LatencyMilliseconds, target.Name, _fps.Source, now);
+            ping.LatencyMilliseconds, target.Name, _fps.Source, now,
+            excludedBySafeMode && settings.SuspendOverlayForExcludedWindows);
     }
 
     public void ResetFpsProvider() => _fps.Reset();
@@ -646,24 +703,30 @@ internal static class CpuTemperatureReader
     }
 }
 
-internal sealed record ForegroundProcessInfo(int ProcessId, string Name);
+internal sealed record ForegroundProcessInfo(int ProcessId, string Name, string WindowTitle)
+{
+    public bool Matches(string[] fragments) => fragments.Any(fragment =>
+        WindowTitle.Contains(fragment, StringComparison.OrdinalIgnoreCase));
+}
 
 internal static class ForegroundProcess
 {
     public static ForegroundProcessInfo Get()
     {
         IntPtr handle = GetForegroundWindow();
-        if (handle == IntPtr.Zero) return new ForegroundProcessInfo(0, "Desktop");
+        if (handle == IntPtr.Zero) return new ForegroundProcessInfo(0, "Desktop", string.Empty);
         GetWindowThreadProcessId(handle, out uint processId);
-        try
-        {
-            using var process = Process.GetProcessById((int)processId);
-            return new ForegroundProcessInfo(process.Id, process.ProcessName);
-        }
-        catch
-        {
-            return new ForegroundProcessInfo(0, "Desktop");
-        }
+        string title = GetWindowTitle(handle);
+        return new ForegroundProcessInfo((int)processId, "Active window", title);
+    }
+
+    private static string GetWindowTitle(IntPtr handle)
+    {
+        int length = GetWindowTextLength(handle);
+        if (length <= 0) return string.Empty;
+        var buffer = new System.Text.StringBuilder(length + 1);
+        _ = GetWindowText(handle, buffer, buffer.Capacity);
+        return buffer.ToString();
     }
 
     [DllImport("user32.dll")]
@@ -671,6 +734,12 @@ internal static class ForegroundProcess
 
     [DllImport("user32.dll")]
     private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetWindowTextLength(IntPtr window);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetWindowText(IntPtr window, System.Text.StringBuilder text, int maxCount);
 }
 
 internal sealed class PresentMonFpsProvider : IDisposable
@@ -748,7 +817,13 @@ internal sealed class PresentMonFpsProvider : IDisposable
         }
     }
 
-    public void Reset() => StopProcess();
+    public void Reset() => Pause("PresentMon zurückgesetzt");
+
+    public void Pause(string reason)
+    {
+        StopProcess();
+        Source = reason;
+    }
 
     private async Task ReadOutputAsync(Process process, CancellationToken cancellationToken)
     {
