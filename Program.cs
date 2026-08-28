@@ -617,6 +617,11 @@ internal sealed class OverlayForm : Form
         {
             PlaceOnSelectedScreen();
             if (!Visible) Show();
+            // Win+D/"Desktop anzeigen" can hide top-level tool windows at the
+            // Win32 level without changing the WinForms Visible property.
+            // Restore only when the user has the overlay enabled.
+            if (IsHandleCreated && !NativeMethods.IsWindowVisible(Handle))
+                NativeMethods.ShowWindow(Handle, 4); // SW_SHOWNOACTIVATE
         }
         else if (Visible)
         {
@@ -728,6 +733,14 @@ internal sealed class OverlayForm : Form
         [DllImport("user32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool IsWindowVisible(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool ShowWindow(IntPtr hWnd, int command);
     }
 }
 
@@ -1065,7 +1078,8 @@ internal static class ForegroundProcess
         GetWindowThreadProcessId(handle, out uint processId);
         string title = GetWindowTitle(handle);
         string className = GetWindowClassName(handle);
-        if (className is "Progman" or "WorkerW" or "Shell_TrayWnd" or "DV2ControlHost")
+        if (className is "Progman" or "WorkerW" or "Shell_TrayWnd" or "DV2ControlHost"
+            or "XamlExplorerHostIslandWindow_WASDK" or "Windows.UI.Core.CoreWindow")
             return new ForegroundProcessInfo(0, "Desktop", title);
         return new ForegroundProcessInfo((int)processId, "Active window", title);
     }
@@ -1109,7 +1123,8 @@ internal sealed class DesktopFpsReader
     public double? Read()
     {
         var timing = new DwmTimingInfo { Size = (uint)Marshal.SizeOf<DwmTimingInfo>() };
-        if (DwmGetCompositionTimingInfo(IntPtr.Zero, ref timing) != 0) return null;
+        if (DwmGetCompositionTimingInfo(IntPtr.Zero, ref timing) != 0)
+            return ReadDisplayRefreshRate();
 
         long timestamp = Stopwatch.GetTimestamp();
         double? observed = null;
@@ -1129,11 +1144,35 @@ internal sealed class DesktopFpsReader
         double configured = timing.RefreshRate.Denominator == 0
             ? 0
             : timing.RefreshRate.Numerator / (double)timing.RefreshRate.Denominator;
-        return observed ?? (configured is >= 1 and <= 1000 ? configured : null);
+        return observed ?? (configured is >= 1 and <= 1000 ? configured : ReadDisplayRefreshRate());
+    }
+
+    private static double? ReadDisplayRefreshRate()
+    {
+        IntPtr deviceContext = GetDC(IntPtr.Zero);
+        if (deviceContext == IntPtr.Zero) return null;
+        try
+        {
+            int refreshRate = GetDeviceCaps(deviceContext, 116); // VREFRESH
+            return refreshRate is >= 1 and <= 1000 ? refreshRate : null;
+        }
+        finally
+        {
+            _ = ReleaseDC(IntPtr.Zero, deviceContext);
+        }
     }
 
     [DllImport("dwmapi.dll")]
     private static extern int DwmGetCompositionTimingInfo(IntPtr window, ref DwmTimingInfo timing);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetDC(IntPtr window);
+
+    [DllImport("user32.dll")]
+    private static extern int ReleaseDC(IntPtr window, IntPtr deviceContext);
+
+    [DllImport("gdi32.dll")]
+    private static extern int GetDeviceCaps(IntPtr deviceContext, int index);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct UnsignedRatio
