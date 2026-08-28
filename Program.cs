@@ -260,7 +260,6 @@ internal static class HotkeyCatalog
 internal sealed record MetricsSnapshot(
     double? Fps,
     double CpuUsage,
-    double? CpuTemperature,
     double GpuUsage,
     double? GpuTemperature,
     double DownloadKibPerSecond,
@@ -272,7 +271,7 @@ internal sealed record MetricsSnapshot(
     DateTimeOffset Timestamp,
     bool CompatibilitySuspended)
 {
-    public static MetricsSnapshot Empty => new(null, 0, null, 0, null, 0, 0, null, null, "Desktop", "PresentMon fehlt", DateTimeOffset.Now, false);
+    public static MetricsSnapshot Empty => new(null, 0, 0, null, 0, 0, null, null, "Desktop", "PresentMon fehlt", DateTimeOffset.Now, false);
 }
 
 internal sealed class OverlayApplicationContext : ApplicationContext
@@ -518,17 +517,23 @@ internal sealed class OverlayForm : Form
     {
         _snapshot = snapshot;
         _metricTexts.Clear();
-        AddMetric("FPS", snapshot.Fps is null ? "--" : $"{snapshot.Fps:0}");
-        AddMetric("CPU", $"{snapshot.CpuUsage:0}% | {FormatTemperature(snapshot.CpuTemperature)}");
-        AddMetric("GPU", $"{snapshot.GpuUsage:0}% | {FormatTemperature(snapshot.GpuTemperature)}");
-        AddMetric("NET", $"↓{snapshot.DownloadKibPerSecond:0} ↑{snapshot.UploadKibPerSecond:0} KiB/s");
-        AddMetric("LOSS", snapshot.PacketLossPercent is null ? "--" : $"{snapshot.PacketLossPercent:0.0}%");
+        AddMetric(snapshot.Fps is null ? "-- FPS" : $"{snapshot.Fps:0} FPS");
+        AddMetric($"{snapshot.CpuUsage:0}% CPU");
+        AddMetric($"{snapshot.GpuUsage:0}% - {FormatTemperature(snapshot.GpuTemperature)} GPU");
+        AddMetric($"↓{snapshot.DownloadKibPerSecond:0} ↑{snapshot.UploadKibPerSecond:0} KiB/s NET");
+        AddMetric(snapshot.PacketLossPercent is null ? "-- LOSS" : $"{snapshot.PacketLossPercent:0.0}% LOSS");
         int width = Padding.Horizontal;
         int height = 18;
-        foreach (string text in _metricTexts)
+        for (int index = 0; index < _metricTexts.Count; index++)
         {
+            string text = _metricTexts[index];
             Size measured = TextRenderer.MeasureText(text, Font, Size.Empty, TextFormatFlags.NoPadding);
             width += measured.Width + 12;
+            if (index < _metricTexts.Count - 1)
+            {
+                Size separator = TextRenderer.MeasureText("|", Font, Size.Empty, TextFormatFlags.NoPadding);
+                width += separator.Width + 12;
+            }
             height = Math.Max(height, measured.Height + Padding.Vertical);
         }
         Width = Math.Max(40, width);
@@ -538,10 +543,7 @@ internal sealed class OverlayForm : Form
 
     private static string FormatTemperature(double? value) => value is null ? "--" : $"{value:0}°C";
 
-    private void AddMetric(string name, string value)
-    {
-        _metricTexts.Add($"{name} {value}");
-    }
+    private void AddMetric(string text) => _metricTexts.Add(text);
 
     private void RenderLayeredSurface()
     {
@@ -567,10 +569,16 @@ internal sealed class OverlayForm : Form
 
                 float x = Padding.Left;
                 float y = Math.Max(0, (Height - Font.GetHeight()) / 2F - 1F);
-                foreach (string text in _metricTexts)
+                for (int index = 0; index < _metricTexts.Count; index++)
                 {
+                    string text = _metricTexts[index];
                     graphics.DrawString(text, Font, textBrush, x, y, stringFormat);
                     x += graphics.MeasureString(text, Font, PointF.Empty, stringFormat).Width + 12F;
+                    if (index < _metricTexts.Count - 1)
+                    {
+                        graphics.DrawString("|", Font, textBrush, x, y, stringFormat);
+                        x += graphics.MeasureString("|", Font, PointF.Empty, stringFormat).Width + 12F;
+                    }
                 }
             }
 
@@ -777,7 +785,6 @@ internal sealed class MetricsSampler : IDisposable
     private readonly DesktopFpsReader _desktopFps = new();
     private readonly PresentMonFpsProvider _fps = new();
     private DateTimeOffset _lastTemperatureRead = DateTimeOffset.MinValue;
-    private double? _cpuTemperature;
     private double? _gpuTemperature;
     private double _gpuUsage;
 
@@ -827,11 +834,10 @@ internal sealed class MetricsSampler : IDisposable
             var gpu = await _gpu.ReadAsync(cancellationToken);
             _gpuUsage = gpu.Usage;
             _gpuTemperature = gpu.Temperature;
-            _cpuTemperature = await CpuTemperatureReader.ReadAsync(cancellationToken);
         }
 
         var ping = await _packetLoss.ReadAsync(settings.PingTarget, cancellationToken);
-        return new MetricsSnapshot(fps, cpuUsage, _cpuTemperature, _gpuUsage, _gpuTemperature,
+        return new MetricsSnapshot(fps, cpuUsage, _gpuUsage, _gpuTemperature,
             network.DownloadKibPerSecond, network.UploadKibPerSecond, ping.LossPercent,
             ping.LatencyMilliseconds, target.Name, fpsSource, now,
             excludedBySafeMode && settings.SuspendOverlayForExcludedWindows);
@@ -1011,64 +1017,6 @@ internal sealed class GpuReader
             catch { }
         }
         return null;
-    }
-}
-
-internal static class CpuTemperatureReader
-{
-    public static async Task<double?> ReadAsync(CancellationToken cancellationToken)
-    {
-        const string script = @"
-$values = @()
-# Use an already installed hardware-monitor provider when available. These
-# namespaces expose CPU sensors without reading device memory or installing a driver.
-foreach ($namespace in @('root/LibreHardwareMonitor', 'root/OpenHardwareMonitor')) {
-  if ($values.Count -gt 0) { break }
-  $values = @(Get-CimInstance -Namespace $namespace -ClassName Sensor -ErrorAction SilentlyContinue |
-    Where-Object { $_.SensorType -eq 'Temperature' -and $_.HardwareType -match 'CPU|Processor' -and $_.Name -match 'Package|Tctl|Tdie|Core' } |
-    ForEach-Object { [double]$_.Value })
-}
-if ($values.Count -eq 0) {
-  $values = @(Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction SilentlyContinue |
-    ForEach-Object { [double]$_.CurrentTemperature / 10 })
-}
-if ($values.Count -eq 0) {
-  # Windows performance data is in Kelvin. Only use zones explicitly identified
-  # as CPU/DTS; generic zones can represent the room, battery, or chassis.
-  $values = @(Get-CimInstance -Namespace root/cimv2 -ClassName Win32_PerfFormattedData_Counters_ThermalZoneInformation -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -match 'CPU|DTS|TZ00|TZ01' } |
-    ForEach-Object { [double]$_.Temperature })
-}
-if ($values.Count -gt 0) {
-  [math]::Round((($values | Measure-Object -Average).Average) - 273.15, 1)
-}
-";
-        try
-        {
-            var psi = new ProcessStartInfo("powershell.exe")
-            {
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true
-            };
-            psi.ArgumentList.Add("-NoLogo");
-            psi.ArgumentList.Add("-NoProfile");
-            psi.ArgumentList.Add("-NonInteractive");
-            psi.ArgumentList.Add("-Command");
-            psi.ArgumentList.Add(script);
-            using var process = Process.Start(psi);
-            if (process is null) return null;
-            string output = await process.StandardOutput.ReadToEndAsync(cancellationToken);
-            await process.WaitForExitAsync(cancellationToken);
-            return double.TryParse(output.Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double temp)
-                ? Math.Clamp(temp, -20, 130)
-                : null;
-        }
-        catch
-        {
-            return null;
-        }
     }
 }
 
