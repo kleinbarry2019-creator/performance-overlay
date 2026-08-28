@@ -44,12 +44,34 @@ internal sealed class OverlaySettings
     public int OffsetX { get; set; } = 18;
     public int OffsetY { get; set; } = 18;
     public bool ClickThrough { get; set; } = true;
-    public bool AntiCheatSafeMode { get; set; } = true;
+    public bool AntiCheatSafeMode { get; set; } = false;
     public bool EnableFpsTelemetry { get; set; } = true;
-    public bool SuspendOverlayForExcludedWindows { get; set; } = true;
+    public bool SuspendOverlayForExcludedWindows { get; set; } = false;
     public string[] FpsExcludedWindowTitleFragments { get; set; } = ["Call of Duty"];
     public string PingTarget { get; set; } = "1.1.1.1";
     public string? PresentMonPath { get; set; }
+
+    public OverlaySettings Clone() => new()
+    {
+        RefreshMilliseconds = RefreshMilliseconds,
+        TemperatureRefreshMilliseconds = TemperatureRefreshMilliseconds,
+        FontFamily = FontFamily,
+        FontSize = FontSize,
+        TextColor = TextColor,
+        BackgroundColor = BackgroundColor,
+        BackgroundOpacity = BackgroundOpacity,
+        CornerRadius = CornerRadius,
+        ScreenIndex = ScreenIndex,
+        OffsetX = OffsetX,
+        OffsetY = OffsetY,
+        ClickThrough = ClickThrough,
+        AntiCheatSafeMode = AntiCheatSafeMode,
+        EnableFpsTelemetry = EnableFpsTelemetry,
+        SuspendOverlayForExcludedWindows = SuspendOverlayForExcludedWindows,
+        FpsExcludedWindowTitleFragments = FpsExcludedWindowTitleFragments.ToArray(),
+        PingTarget = PingTarget,
+        PresentMonPath = PresentMonPath
+    };
 }
 
 internal static class SettingsStore
@@ -153,11 +175,12 @@ internal sealed record MetricsSnapshot(
 
 internal sealed class OverlayApplicationContext : ApplicationContext
 {
-    private readonly OverlaySettings _settings;
+    private OverlaySettings _settings;
     private readonly OverlayForm _form;
     private readonly MetricsSampler _sampler;
     private readonly NotifyIcon _notifyIcon;
     private readonly System.Windows.Forms.Timer _timer;
+    private OverlaySettingsForm? _settingsForm;
     private bool _sampling;
 
     public OverlayApplicationContext()
@@ -171,7 +194,8 @@ internal sealed class OverlayApplicationContext : ApplicationContext
         menu.Items.Add("Overlay anzeigen/verbergen", null, (_, _) => _form.ToggleVisible());
         menu.Items.Add("Klick-Durchlässigkeit umschalten", null, (_, _) => ToggleClickThrough());
         menu.Items.Add("Anti-Cheat-Safe-Modus umschalten", null, (_, _) => ToggleAntiCheatSafeMode());
-        menu.Items.Add("Konfiguration öffnen", null, (_, _) => OpenSettings());
+        menu.Items.Add("Overlay-Einstellungen …", null, (_, _) => OpenSettingsUi());
+        menu.Items.Add("Konfigurationsdatei öffnen", null, (_, _) => OpenRawSettings());
         menu.Items.Add("Messquelle zurücksetzen", null, (_, _) => _sampler.ResetFpsProvider());
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Beenden", null, (_, _) => ExitThread());
@@ -227,7 +251,26 @@ internal sealed class OverlayApplicationContext : ApplicationContext
             : "Anti-Cheat-Safe-Modus deaktiviert; nur für ausdrücklich unterstützte Spiele verwenden.");
     }
 
-    private void OpenSettings()
+    private void OpenSettingsUi()
+    {
+        if (_settingsForm is null || _settingsForm.IsDisposed)
+        {
+            _settingsForm = new OverlaySettingsForm(_settings, updatedSettings =>
+            {
+                _settings = updatedSettings;
+                SettingsStore.Save(_settings);
+                _timer.Interval = _settings.RefreshMilliseconds;
+                _form.ApplySettings(_settings);
+            });
+            _settingsForm.FormClosed += (_, _) => _settingsForm = null;
+        }
+
+        if (!_settingsForm.Visible) _settingsForm.Show();
+        _settingsForm.WindowState = FormWindowState.Normal;
+        _settingsForm.Activate();
+    }
+
+    private void OpenRawSettings()
     {
         SettingsStore.Save(_settings);
         Process.Start(new ProcessStartInfo("notepad.exe", SettingsStore.FilePath) { UseShellExecute = true });
@@ -289,7 +332,9 @@ internal sealed class OverlayForm : Form
         {
             var cp = base.CreateParams;
             cp.ExStyle |= WsExToolWindow | WsExNoActivate;
-            if (_settings.ClickThrough) cp.ExStyle |= WsExTransparent;
+            // WinForms can request CreateParams from the base Form constructor
+            // before the derived constructor has assigned its settings field.
+            if (_settings?.ClickThrough == true) cp.ExStyle |= WsExTransparent;
             return cp;
         }
     }
@@ -431,8 +476,8 @@ internal sealed class MetricChip : Control
         AutoSize = true;
         Margin = new Padding(6, 0, 6, 0);
         Padding = new Padding(0);
-        BackColor = Color.Transparent;
         SetStyle(ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor, true);
+        BackColor = Color.Transparent;
         var measured = TextRenderer.MeasureText(text, font, Size.Empty, TextFormatFlags.NoPadding);
         Size = new Size(measured.Width, Math.Max(measured.Height, 16));
     }
@@ -463,7 +508,9 @@ internal sealed class MetricsSampler : IDisposable
         double cpuUsage = _cpu.ReadPercent();
         var network = _network.ReadRates();
         var target = ForegroundProcess.Get();
-        bool excludedBySafeMode = settings.AntiCheatSafeMode && target.Matches(settings.FpsExcludedWindowTitleFragments);
+        bool excludedBySafeMode = settings.AntiCheatSafeMode
+            && settings.SuspendOverlayForExcludedWindows
+            && target.Matches(settings.FpsExcludedWindowTitleFragments);
         double? fps;
         if (settings.EnableFpsTelemetry && !excludedBySafeMode)
         {
@@ -673,7 +720,20 @@ internal static class CpuTemperatureReader
 {
     public static async Task<double?> ReadAsync(CancellationToken cancellationToken)
     {
-        const string script = "$t=Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction SilentlyContinue | Select-Object -ExpandProperty CurrentTemperature; if($t){ (($t | Measure-Object -Average).Average / 10) - 273.15 }";
+        const string script = @"
+$values = @(Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction SilentlyContinue |
+  ForEach-Object { [double]$_.CurrentTemperature / 10 })
+if ($values.Count -eq 0) {
+  # Windows performance data is in Kelvin. Only use zones explicitly identified
+  # as CPU/DTS; generic zones can represent the room, battery, or chassis.
+  $values = @(Get-CimInstance -Namespace root/cimv2 -ClassName Win32_PerfFormattedData_Counters_ThermalZoneInformation -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -match 'CPU|DTS|TZ00|TZ01' } |
+    ForEach-Object { [double]$_.Temperature })
+}
+if ($values.Count -gt 0) {
+  [math]::Round((($values | Measure-Object -Average).Average) - 273.15, 1)
+}
+";
         try
         {
             var psi = new ProcessStartInfo("powershell.exe")
@@ -778,7 +838,6 @@ internal sealed class PresentMonFpsProvider : IDisposable
             psi.ArgumentList.Add("--process_id");
             psi.ArgumentList.Add(processId.ToString(System.Globalization.CultureInfo.InvariantCulture));
             psi.ArgumentList.Add("--output_stdout");
-            psi.ArgumentList.Add("--no_csv");
             psi.ArgumentList.Add("--no_console_stats");
             psi.ArgumentList.Add("--exclude_dropped");
             psi.ArgumentList.Add("--terminate_on_proc_exit");

@@ -11,9 +11,9 @@
   "OffsetX": 18,
   "OffsetY": 18,
   "ClickThrough": true,
-  "AntiCheatSafeMode": true,
+  "AntiCheatSafeMode": false,
   "EnableFpsTelemetry": true,
-  "SuspendOverlayForExcludedWindows": true,
+  "SuspendOverlayForExcludedWindows": false,
   "FpsExcludedWindowTitleFragments": [
     "Call of Duty"
   ],
