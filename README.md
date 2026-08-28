@@ -22,7 +22,7 @@ Das ist keine Garantie für eine Freigabe durch ein Anti-Cheat-System. Geschütz
 dotnet run -c Release
 ```
 
-Für einen fertigen x64-Build genügt `PerformanceOverlay.exe`. Der FPS-Wert wird nur aus PresentMon-Frame-Presents berechnet. GPU-Werte verwenden `nvidia-smi.exe`; CPU-Temperatur kann je nach ACPI-Sensor nicht verfügbar sein und wird dann als `--` dargestellt.
+Für einen fertigen x64-Build genügt `PerformanceOverlay.exe`. Während ein Spiel oder eine andere Anwendung aktiv ist, wird der FPS-Wert aus den tatsächlich präsentierten Frames über PresentMon berechnet. Auf dem Windows-Desktop bzw. Startbildschirm verwendet das Overlay als Fallback die aktuelle DWM-Kompositions-/Bildschirmrate, damit dort ebenfalls ein Live-FPS-Wert sichtbar bleibt. Wenn ein geschütztes Spiel die externe Frame-Telemetrie blockiert, bleibt der Spielwert korrekt `--` statt eine erfundene Monitorrate anzuzeigen. GPU-Werte verwenden `nvidia-smi.exe`; CPU-Temperatur kann je nach ACPI-Sensor nicht verfügbar sein und wird dann als `--` dargestellt.
 
 Zusätzliche Desktop-Verknüpfungen können `PerformanceOverlay.exe --toggle` zum Ein-/Ausblenden und `PerformanceOverlay.exe --settings` zum Öffnen der Einstellungsseite verwenden. Die Anwendung startet nicht automatisch mit Windows.
 

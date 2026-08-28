@@ -761,6 +761,7 @@ internal sealed class MetricsSampler : IDisposable
     private readonly NetworkRateReader _network = new();
     private readonly PacketLossReader _packetLoss = new();
     private readonly GpuReader _gpu = new();
+    private readonly DesktopFpsReader _desktopFps = new();
     private readonly PresentMonFpsProvider _fps = new();
     private DateTimeOffset _lastTemperatureRead = DateTimeOffset.MinValue;
     private double? _cpuTemperature;
@@ -777,15 +778,25 @@ internal sealed class MetricsSampler : IDisposable
             && settings.SuspendOverlayForExcludedWindows
             && target.Matches(settings.FpsExcludedWindowTitleFragments);
         double? fps;
-        if (settings.EnableFpsTelemetry && !excludedBySafeMode)
+        string fpsSource;
+        if (settings.EnableFpsTelemetry && target.ProcessId == 0)
+        {
+            if (!string.Equals(_fps.Source, "DWM Desktop", StringComparison.Ordinal)) _fps.Pause("DWM Desktop");
+            fps = _desktopFps.Read();
+            fpsSource = "DWM Desktop";
+        }
+        else if (settings.EnableFpsTelemetry && !excludedBySafeMode)
         {
             await _fps.EnsureProcessAsync(target.ProcessId, settings.PresentMonPath, cancellationToken);
             fps = _fps.ReadFps();
+            fpsSource = _fps.Source;
         }
         else
         {
-            _fps.Pause(excludedBySafeMode ? "FPS pausiert (Safe-Modus)" : "FPS deaktiviert");
+            string reason = excludedBySafeMode ? "FPS pausiert (Safe-Modus)" : "FPS deaktiviert";
+            if (!string.Equals(_fps.Source, reason, StringComparison.Ordinal)) _fps.Pause(reason);
             fps = null;
+            fpsSource = reason;
         }
 
         if (now - _lastTemperatureRead >= TimeSpan.FromMilliseconds(settings.TemperatureRefreshMilliseconds))
@@ -800,7 +811,7 @@ internal sealed class MetricsSampler : IDisposable
         var ping = await _packetLoss.ReadAsync(settings.PingTarget, cancellationToken);
         return new MetricsSnapshot(fps, cpuUsage, _cpuTemperature, _gpuUsage, _gpuTemperature,
             network.DownloadKibPerSecond, network.UploadKibPerSecond, ping.LossPercent,
-            ping.LatencyMilliseconds, target.Name, _fps.Source, now,
+            ping.LatencyMilliseconds, target.Name, fpsSource, now,
             excludedBySafeMode && settings.SuspendOverlayForExcludedWindows);
     }
 
@@ -1053,6 +1064,9 @@ internal static class ForegroundProcess
         if (handle == IntPtr.Zero) return new ForegroundProcessInfo(0, "Desktop", string.Empty);
         GetWindowThreadProcessId(handle, out uint processId);
         string title = GetWindowTitle(handle);
+        string className = GetWindowClassName(handle);
+        if (className is "Progman" or "WorkerW" or "Shell_TrayWnd" or "DV2ControlHost")
+            return new ForegroundProcessInfo(0, "Desktop", title);
         return new ForegroundProcessInfo((int)processId, "Active window", title);
     }
 
@@ -1063,6 +1077,12 @@ internal static class ForegroundProcess
         var buffer = new System.Text.StringBuilder(length + 1);
         _ = GetWindowText(handle, buffer, buffer.Capacity);
         return buffer.ToString();
+    }
+
+    private static string GetWindowClassName(IntPtr handle)
+    {
+        var buffer = new System.Text.StringBuilder(256);
+        return GetClassName(handle, buffer, buffer.Capacity) > 0 ? buffer.ToString() : string.Empty;
     }
 
     [DllImport("user32.dll")]
@@ -1076,6 +1096,96 @@ internal static class ForegroundProcess
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern int GetWindowText(IntPtr window, System.Text.StringBuilder text, int maxCount);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetClassName(IntPtr window, System.Text.StringBuilder className, int maxCount);
+}
+
+internal sealed class DesktopFpsReader
+{
+    private ulong _lastRefresh;
+    private long _lastTimestamp;
+
+    public double? Read()
+    {
+        var timing = new DwmTimingInfo { Size = (uint)Marshal.SizeOf<DwmTimingInfo>() };
+        if (DwmGetCompositionTimingInfo(IntPtr.Zero, ref timing) != 0) return null;
+
+        long timestamp = Stopwatch.GetTimestamp();
+        double? observed = null;
+        if (_lastTimestamp != 0 && timing.RefreshCount >= _lastRefresh)
+        {
+            double seconds = (timestamp - _lastTimestamp) / (double)Stopwatch.Frequency;
+            ulong refreshDelta = timing.RefreshCount - _lastRefresh;
+            if (seconds > 0 && refreshDelta > 0)
+            {
+                double rate = refreshDelta / seconds;
+                if (rate is >= 1 and <= 1000) observed = rate;
+            }
+        }
+
+        _lastRefresh = timing.RefreshCount;
+        _lastTimestamp = timestamp;
+        double configured = timing.RefreshRate.Denominator == 0
+            ? 0
+            : timing.RefreshRate.Numerator / (double)timing.RefreshRate.Denominator;
+        return observed ?? (configured is >= 1 and <= 1000 ? configured : null);
+    }
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmGetCompositionTimingInfo(IntPtr window, ref DwmTimingInfo timing);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct UnsignedRatio
+    {
+        public uint Numerator;
+        public uint Denominator;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct DwmTimingInfo
+    {
+        public uint Size;
+        public UnsignedRatio RefreshRate;
+        public long RefreshPeriod;
+        public UnsignedRatio ComposeRate;
+        public long VBlank;
+        public ulong RefreshCount;
+        public uint DxRefresh;
+        public long Compose;
+        public ulong Frame;
+        public uint DxPresent;
+        public ulong RefreshFrame;
+        public ulong FrameSubmitted;
+        public uint DxPresentSubmitted;
+        public ulong FrameConfirmed;
+        public uint DxPresentConfirmed;
+        public ulong RefreshConfirmed;
+        public uint DxRefreshConfirmed;
+        public ulong FramesLate;
+        public uint FramesOutstanding;
+        public ulong FrameDisplayed;
+        public long QpcFrameDisplayed;
+        public ulong RefreshFrameDisplayed;
+        public ulong FrameComplete;
+        public long QpcFrameComplete;
+        public ulong FramePending;
+        public long QpcFramePending;
+        public ulong FramesDisplayed;
+        public ulong FramesComplete;
+        public ulong FramesPending;
+        public ulong FramesAvailable;
+        public ulong FramesDropped;
+        public ulong FramesMissed;
+        public ulong RefreshNextDisplayed;
+        public ulong RefreshNextPresented;
+        public ulong RefreshesDisplayed;
+        public ulong RefreshesPresented;
+        public ulong RefreshStarted;
+        public ulong PixelsReceived;
+        public ulong PixelsDrawn;
+        public ulong BuffersEmpty;
+    }
 }
 
 internal sealed class PresentMonFpsProvider : IDisposable
@@ -1274,6 +1384,7 @@ internal static class SelfTest
             File.WriteAllText(path, JsonSerializer.Serialize(settings));
             var roundTrip = JsonSerializer.Deserialize<OverlaySettings>(File.ReadAllText(path));
             if (roundTrip is null || roundTrip.RefreshMilliseconds != 1) throw new InvalidOperationException("Settings round-trip failed.");
+            if (new DesktopFpsReader().Read() is not > 0) throw new InvalidOperationException("DWM desktop FPS unavailable.");
             Console.WriteLine("PerformanceOverlay self-test: PASS");
         }
         finally
