@@ -1074,6 +1074,7 @@ internal static class ForegroundProcess
 
 internal sealed class DesktopFpsReader
 {
+    private ulong _lastFrame;
     private ulong _lastRefresh;
     private long _lastTimestamp;
 
@@ -1085,23 +1086,36 @@ internal sealed class DesktopFpsReader
 
         long timestamp = Stopwatch.GetTimestamp();
         double? observed = null;
-        if (_lastTimestamp != 0 && timing.RefreshCount >= _lastRefresh)
+        if (_lastTimestamp != 0)
         {
             double seconds = (timestamp - _lastTimestamp) / (double)Stopwatch.Frequency;
-            ulong refreshDelta = timing.RefreshCount - _lastRefresh;
-            if (seconds > 0 && refreshDelta > 0)
+            if (seconds > 0 && timing.Frame >= _lastFrame)
             {
+                ulong frameDelta = timing.Frame - _lastFrame;
+                double rate = frameDelta / seconds;
+                if (rate is >= 1 and <= 1000) observed = rate;
+            }
+
+            if (observed is null && seconds > 0 && timing.RefreshCount >= _lastRefresh)
+            {
+                ulong refreshDelta = timing.RefreshCount - _lastRefresh;
                 double rate = refreshDelta / seconds;
                 if (rate is >= 1 and <= 1000) observed = rate;
             }
         }
 
+        _lastFrame = timing.Frame;
         _lastRefresh = timing.RefreshCount;
         _lastTimestamp = timestamp;
-        double configured = timing.RefreshRate.Denominator == 0
+        double compositionRate = timing.ComposeRate.Denominator == 0
+            ? 0
+            : timing.ComposeRate.Numerator / (double)timing.ComposeRate.Denominator;
+        double refreshRate = timing.RefreshRate.Denominator == 0
             ? 0
             : timing.RefreshRate.Numerator / (double)timing.RefreshRate.Denominator;
-        return observed ?? (configured is >= 1 and <= 1000 ? configured : ReadDisplayRefreshRate());
+        return observed
+            ?? (compositionRate is >= 1 and <= 1000 ? compositionRate
+                : refreshRate is >= 1 and <= 1000 ? refreshRate : ReadDisplayRefreshRate());
     }
 
     private static double? ReadDisplayRefreshRate()
